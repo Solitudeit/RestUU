@@ -62,7 +62,8 @@ flutter/web/
 .worktrees/
 # Operit / Android 工作区本地产物
 .operit-ref.json
-*.operit-ref.json
+*operit-ref.json
+!.operit-ref.json
 .uui_backup/
 
 # 构建产物
@@ -77,3 +78,14 @@ flutter/web/
 .DS_Store
 .idea/
 .vscode/
+
+# ---- 上游 .gitignore 的 *png / *svg / *jpg 会把 Android 资源误删 ----
+# RustDesk 上游用这些规则忽略桌面端图标产物，但 APK 的 mipmap/drawable
+# 必须进仓库，否则 AAPT 报 resource mipmap/ic_launcher_foreground not found。
+!flutter/android/app/src/main/res/**/*.png
+!flutter/android/app/src/main/res/**/*.jpg
+!flutter/android/app/src/main/res/**/*.webp
+!flutter/assets/**/*.png
+!flutter/assets/**/*.jpg
+!flutter/assets/**/*.webp
+!flutter/assets/**/*.svg
