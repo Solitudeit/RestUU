@@ -232,11 +232,14 @@ jobs:
           cargo install cargo-expand --version 1.0.95 --locked
           cargo install flutter_rust_bridge_codegen --version 1.80.1 --features "uuid" --locked
 
-      - name: Prepare bridge pubspec
+      - name: Prepare pubspec
         shell: bash
         run: |
-          # extended_text 14 需要更新的 Dart，Flutter 3.24.5 解析不了，降到 13
-          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          # 注意：官方 bridge 流程在 Flutter 3.22.3 下会把 extended_text 降到 13，
+          # 但本项目用 Flutter 3.24.5，extended_text 13 与其 RenderParagraph API
+          # 不兼容（Too few positional arguments: 3 required, 2 given），
+          # 必须保持 pubspec 里的 14.0.0，不能降级。
+          grep -n 'extended_text' flutter/pubspec.yaml
           cd flutter && flutter pub get
 
       - name: Generate bridge
