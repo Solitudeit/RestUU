@@ -1,0 +1,200 @@
+name: Android APK (UU style)
+
+# 只需要 Android APK，不跑官方 134 KB 的全平台流程。
+# 没有签名密钥也能构建，产出的是 unsigned APK（可装机测试，不能上架）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "目标架构"
+        type: choice
+        default: arm64
+        options:
+          - arm64
+          - armv7
+          - x86_64
+  push:
+    branches: [master]
+    paths:
+      - "flutter/lib/**"
+      - ".github/workflows/android-uu.yml"
+
+env:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.24.5"
+  NDK_VERSION: "r28c"
+  CARGO_NDK_VERSION: "3.1.2"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VERSION: "1.5.3"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+jobs:
+  build-android:
+    name: build apk ${{ inputs.arch || 'arm64' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+               clang cmake curl git gcc g++ libclang-dev \
+               llvm-dev nasm ninja-build openjdk-17-jdk-headless \
+               pkg-config tree wget
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Patch flutter
+        run: |
+          cd $(dirname $(dirname $(which flutter)))
+          git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Resolve target
+        id: tgt
+        shell: bash
+        run: |
+          ARCH="${{ inputs.arch || 'arm64' }}"
+          case "$ARCH" in
+            arm64)  T=aarch64-linux-android;    A=arm64-v8a;    AB=arm64 ;;
+            armv7)  T=armv7-linux-androideabi;  A=armeabi-v7a;  AB=arm ;;
+            x86_64) T=x86_64-linux-android;     A=x86_64;       AB=x86_64 ;;
+            *) echo "unknown arch $ARCH"; exit 1 ;;
+          esac
+          echo "target=$T"    >> $GITHUB_OUTPUT
+          echo "abi=$A"       >> $GITHUB_OUTPUT
+          echo "archname=$AB" >> $GITHUB_OUTPUT
+          echo "resolved $T / $A"
+
+      - name: Install vcpkg dependencies
+        shell: bash
+        run: |
+          if ! ./flutter/build_android_deps.sh "${{ steps.tgt.outputs.abi }}"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r f; do
+              echo "=== $f ==="; cat "$f"; echo
+            done
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ steps.tgt.outputs.target }}
+          components: "rustfmt"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          prefix-key: android-uu
+          key: ${{ steps.tgt.outputs.target }}
+
+      - name: Install bridge codegen
+        shell: bash
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features "uuid" --locked
+
+      - name: Prepare bridge pubspec
+        shell: bash
+        run: |
+          # extended_text 14 需要更新的 Dart，Flutter 3.24.5 解析不了，降到 13
+          sed -i -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          cd flutter && flutter pub get
+
+      - name: Generate bridge
+        shell: bash
+        run: |
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      - name: Build rustdesk lib
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          rustup target add ${{ steps.tgt.outputs.target }}
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          case "${{ steps.tgt.outputs.target }}" in
+            aarch64-linux-android)   ./flutter/ndk_arm64.sh ;;
+            armv7-linux-androideabi) ./flutter/ndk_arm.sh ;;
+            x86_64-linux-android)    ./flutter/ndk_x64.sh ;;
+          esac
+          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}
+          cp ./target/${{ steps.tgt.outputs.target }}/release/liblibrustdesk.so \
+             ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}/librustdesk.so
+          ls -lh ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}/
+
+      - name: Build APK
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd flutter
+          flutter build apk --release --target-platform android-${{ steps.tgt.outputs.archname }}
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p out
+          cp flutter/build/app/outputs/flutter-apk/app-release.apk \
+             "out/rustdesk-${VERSION}-${{ steps.tgt.outputs.archname }}-uu.apk" || {
+               echo "未找到 APK，列出产物目录："
+               find flutter/build/app/outputs -name '*.apk' -exec ls -lh {} \;
+               exit 1
+             }
+          ls -lh out/
+          sha256sum out/*.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-uu-${{ steps.tgt.outputs.archname }}
+          path: out/*.apk
+          retention-days: 14

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- UU-style brand blue (matches Flutter MyTheme.uuBrand) -->
+    <color name="primary">#FF3A7BFC</color>
+    <color name="uu_brand">#FF3A7BFC</color>
+    <color name="uu_brand_dark">#FF0B66DD</color>
+    <color name="uu_brand_light">#FFDEF0FF</color>
+    <color name="uu_page_bg">#FFF5F7FB</color>
+</resources>
