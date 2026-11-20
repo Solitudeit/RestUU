@@ -158,29 +158,50 @@ jobs:
           java -version 2>&1 | head -1
 
       - name: Install vcpkg dependencies
+        id: vcpkg
         shell: bash
         env:
           VCPKG_MAX_CONCURRENCY: "4"
         run: |
-          set -o pipefail
           mkdir -p /tmp/vcpkglog
-          if ! ./flutter/build_android_deps.sh "${{ steps.tgt.outputs.abi }}" 2>&1 | tee /tmp/vcpkglog/build.log; then
-            echo "==================== vcpkg 失败 ===================="
-            echo "--- build.log 末尾 400 行 ---"
-            tail -n 400 /tmp/vcpkglog/build.log || true
-            echo "--- vcpkg 自身日志 ---"
-            find "$VCPKG_ROOT" -name "*.log" -newermt '-40 minutes' 2>/dev/null | while read -r f; do
-              echo "########## $f ##########"
-              tail -n 200 "$f" || true
-              echo
-            done
-            echo "--- buildtrees 中的 CMake 错误 ---"
-            grep -rl "CMake Error\|error:" "$VCPKG_ROOT/buildtrees" 2>/dev/null | head -10 | while read -r f; do
-              echo "########## $f ##########"
-              tail -n 80 "$f" || true
-            done
-            exit 1
+          set +e
+          ./flutter/build_android_deps.sh "${{ steps.tgt.outputs.abi }}" > /tmp/vcpkglog/build.log 2>&1
+          RC=$?
+          set -e
+
+          # 全文回显到 job 日志（公开可读，便于排查）
+          echo "----- build.log 全文开始 -----"
+          cat /tmp/vcpkglog/build.log || true
+          echo "----- build.log 全文结束 (exit=$RC) -----"
+
+          if [ $RC -ne 0 ]; then
+            {
+              echo "## ❌ vcpkg 依赖安装失败 (exit=$RC)"
+              echo ''
+              echo '```'
+              tail -n 200 /tmp/vcpkglog/build.log 2>/dev/null || echo '(无输出)'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit $RC
           fi
+
+      - name: Dump vcpkg diagnostics on failure
+        if: failure() && steps.vcpkg.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "==== 环境 ===="
+          echo "VCPKG_ROOT=$VCPKG_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          ls -la "$VCPKG_ROOT" 2>/dev/null | head -10 || echo '(VCPKG_ROOT 不可访问)'
+          echo
+          echo "==== vcpkg 日志文件 ===="
+          find "$VCPKG_ROOT" -maxdepth 3 -name '*.log' 2>/dev/null | head -20
+          echo
+          echo "==== buildtrees 最近失败 ===="
+          ls -lt "$VCPKG_ROOT/buildtrees" 2>/dev/null | head -15 || echo '(无 buildtrees)'
+          echo
+          echo "==== build.log 大小 ===="
+          wc -c /tmp/vcpkglog/build.log 2>/dev/null || echo '(文件不存在)'
 
       - name: Upload vcpkg logs on failure
         if: failure()
