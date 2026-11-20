@@ -279,27 +279,40 @@ jobs:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
           export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          mkdir -p /tmp/vcpkglog
+
+          echo "===== 前置检查 ====="
+          echo "[jniLibs]"
+          ls -lh flutter/android/app/src/main/jniLibs/*/ || echo "(空)"
+          echo "[generated_bridge]"
+          ls -lh flutter/lib/generated_bridge*.dart 2>/dev/null || echo "(缺失!)"
+          echo "[local.properties]"
+          ls -lh flutter/android/local.properties 2>/dev/null || echo "(缺失, flutter 会自动生成)"
+          echo "[java]"
+          java -version 2>&1 | head -2
+          echo
+
           # 提高 Gradle 堆，CI 上默认 1G 容易 OOM
           sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx4g/g" ./flutter/android/gradle.properties
-          # 没有 key.properties 时用 debug 签名（与 build.gradle 的兜底逻辑一致）
+          # 没有 key.properties 时用 debug 签名
           if [ ! -f ./flutter/android/key.properties ]; then
             sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
           fi
+
           cd flutter
           set -o pipefail
           flutter build apk --release \
             --target-platform android-${{ steps.tgt.outputs.archname }} \
             --split-per-abi 2>&1 | tee /tmp/vcpkglog/gradle.log || {
-            echo "==================== flutter build 失败 ===================="
-            echo "--- gradle.log 末尾 300 行 ---"
-            tail -n 300 /tmp/vcpkglog/gradle.log
-            {
-              echo "## ❌ flutter build apk 失败"
-              echo ''
-              echo '```'
-              tail -n 150 /tmp/vcpkglog/gradle.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            RC=$?
+            echo
+            echo "==================== flutter build 失败 (rc=$RC) ===================="
+            echo "--- 关键错误行 ---"
+            grep -nE "FAILURE|What went wrong|error:|Error:|Caused by|Could not|Execution failed|> Task .* FAILED" \
+              /tmp/vcpkglog/gradle.log | head -60 || true
+            echo
+            echo "--- 末尾 200 行 ---"
+            tail -n 200 /tmp/vcpkglog/gradle.log
             exit 1
           }
 
