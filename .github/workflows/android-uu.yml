@@ -258,27 +258,72 @@ jobs:
             armv7-linux-androideabi) ./flutter/ndk_arm.sh ;;
             x86_64-linux-android)    ./flutter/ndk_x64.sh ;;
           esac
-          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}
-          cp ./target/${{ steps.tgt.outputs.target }}/release/liblibrustdesk.so \
-             ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}/librustdesk.so
-          ls -lh ./flutter/android/app/src/main/jniLibs/${{ steps.tgt.outputs.abi }}/
+          ABI="${{ steps.tgt.outputs.abi }}"
+          mkdir -p "./flutter/android/app/src/main/jniLibs/$ABI"
+          cp "./target/${{ steps.tgt.outputs.target }}/release/liblibrustdesk.so" \
+             "./flutter/android/app/src/main/jniLibs/$ABI/librustdesk.so"
+          # Flutter 运行时必需：把 NDK 里的 libc++_shared.so 一并打进去
+          case "$ABI" in
+            arm64-v8a)   NDK_TARGET=aarch64-linux-android ;;
+            armeabi-v7a) NDK_TARGET=arm-linux-androideabi ;;
+            x86_64)      NDK_TARGET=x86_64-linux-android ;;
+            x86)         NDK_TARGET=i686-linux-android ;;
+          esac
+          cp "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${NDK_TARGET}/libc++_shared.so" \
+             "./flutter/android/app/src/main/jniLibs/$ABI/" || echo "警告: 未找到 libc++_shared.so"
+          ls -lh "./flutter/android/app/src/main/jniLibs/$ABI/"
 
       - name: Build APK
         shell: bash
+        env:
+          JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
         run: |
+          export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
+          # 提高 Gradle 堆，CI 上默认 1G 容易 OOM
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx4g/g" ./flutter/android/gradle.properties
+          # 没有 key.properties 时用 debug 签名（与 build.gradle 的兜底逻辑一致）
+          if [ ! -f ./flutter/android/key.properties ]; then
+            sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
+          fi
           cd flutter
-          flutter build apk --release --target-platform android-${{ steps.tgt.outputs.archname }}
+          set -o pipefail
+          flutter build apk --release \
+            --target-platform android-${{ steps.tgt.outputs.archname }} \
+            --split-per-abi 2>&1 | tee /tmp/vcpkglog/gradle.log || {
+            echo "==================== flutter build 失败 ===================="
+            echo "--- gradle.log 末尾 300 行 ---"
+            tail -n 300 /tmp/vcpkglog/gradle.log
+            {
+              echo "## ❌ flutter build apk 失败"
+              echo ''
+              echo '```'
+              tail -n 150 /tmp/vcpkglog/gradle.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-logs
+          path: /tmp/vcpkglog/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Collect APK
         shell: bash
         run: |
           mkdir -p out
-          cp flutter/build/app/outputs/flutter-apk/app-release.apk \
-             "out/rustdesk-${VERSION}-${{ steps.tgt.outputs.archname }}-uu.apk" || {
-               echo "未找到 APK，列出产物目录："
-               find flutter/build/app/outputs -name '*.apk' -exec ls -lh {} \;
-               exit 1
-             }
+          ABI="${{ steps.tgt.outputs.abi }}"
+          SRC="flutter/build/app/outputs/flutter-apk/app-${ABI}-release.apk"
+          if [ ! -f "$SRC" ]; then
+            echo "未找到 $SRC，列出产物目录："
+            find flutter/build/app/outputs -name '*.apk' -exec ls -lh {} \;
+            exit 1
+          fi
+          cp "$SRC" "out/rustdesk-${VERSION}-${{ steps.tgt.outputs.archname }}-uu.apk"
           ls -lh out/
           sha256sum out/*.apk
 
