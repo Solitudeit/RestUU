@@ -1,7 +1,7 @@
 name: Android APK (UU style)
 
-# 只需要 Android APK，不跑官方 134 KB 的全平台流程。
-# 没有签名密钥也能构建，产出的是 unsigned APK（可装机测试，不能上架）。
+# 只构建 Android APK，不跑官方 134 KB 的全平台流程。
+# 没有签名密钥也能构建（回退 debug 签名），产物可装机测试。
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ on:
       - "flutter/android/**"
       - "src/**"
       - "libs/**"
+      - "vcpkg.json"
       - ".github/workflows/android-uu.yml"
 
 env:
@@ -29,6 +30,7 @@ env:
   NDK_VERSION: "r28c"
   CARGO_NDK_VERSION: "3.1.2"
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VCPKG_CMAKE_VERSION: "4.3.0"
   VERSION: "1.5.3"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
@@ -36,7 +38,7 @@ jobs:
   build-android:
     name: build apk ${{ inputs.arch || 'arm64' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -61,13 +63,40 @@ jobs:
         with:
           submodules: recursive
 
+      # 与官方 Android 任务保持一致的依赖集合
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-               clang cmake curl git gcc g++ libclang-dev \
-               llvm-dev nasm ninja-build openjdk-17-jdk-headless \
-               pkg-config tree wget
+               clang \
+               cmake \
+               curl \
+               gcc-multilib \
+               git \
+               g++ \
+               g++-multilib \
+               libayatana-appindicator3-dev \
+               libasound2-dev \
+               libc6-dev \
+               libclang-dev \
+               libunwind-dev \
+               libgstreamer1.0-dev \
+               libgstreamer-plugins-base1.0-dev \
+               libgtk-3-dev \
+               libpulse-dev \
+               libva-dev \
+               libxcb-randr0-dev \
+               libxcb-shape0-dev \
+               libxcb-xfixes0-dev \
+               libxdo-dev \
+               libxfixes-dev \
+               llvm-dev \
+               nasm \
+               ninja-build \
+               openjdk-17-jdk-headless \
+               pkg-config \
+               tree \
+               wget
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -78,7 +107,9 @@ jobs:
       - name: Patch flutter
         run: |
           cd $(dirname $(dirname $(which flutter)))
-          git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+          if [[ "${{ env.FLUTTER_VERSION }}" == "3.24.5" ]]; then
+            git apply ${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff || true
+          fi
 
       - name: Setup NDK
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
@@ -86,6 +117,11 @@ jobs:
         with:
           ndk-version: ${{ env.NDK_VERSION }}
           add-to-path: true
+
+      - name: Export NDK env
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> $GITHUB_ENV
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
@@ -110,15 +146,51 @@ jobs:
           echo "archname=$AB" >> $GITHUB_OUTPUT
           echo "resolved $T / $A"
 
+      - name: Debug environment
+        run: |
+          echo "VCPKG_ROOT=$VCPKG_ROOT"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          ls -la "$VCPKG_ROOT" | head -5
+          "$VCPKG_ROOT/vcpkg" version || true
+          cmake --version | head -1
+          ninja --version
+          java -version 2>&1 | head -1
+
       - name: Install vcpkg dependencies
         shell: bash
+        env:
+          VCPKG_MAX_CONCURRENCY: "4"
         run: |
-          if ! ./flutter/build_android_deps.sh "${{ steps.tgt.outputs.abi }}"; then
-            find "${VCPKG_ROOT}/" -name "*.log" | while read -r f; do
-              echo "=== $f ==="; cat "$f"; echo
+          set -o pipefail
+          mkdir -p /tmp/vcpkglog
+          if ! ./flutter/build_android_deps.sh "${{ steps.tgt.outputs.abi }}" 2>&1 | tee /tmp/vcpkglog/build.log; then
+            echo "==================== vcpkg 失败 ===================="
+            echo "--- build.log 末尾 400 行 ---"
+            tail -n 400 /tmp/vcpkglog/build.log || true
+            echo "--- vcpkg 自身日志 ---"
+            find "$VCPKG_ROOT" -name "*.log" -newermt '-40 minutes' 2>/dev/null | while read -r f; do
+              echo "########## $f ##########"
+              tail -n 200 "$f" || true
+              echo
+            done
+            echo "--- buildtrees 中的 CMake 错误 ---"
+            grep -rl "CMake Error\|error:" "$VCPKG_ROOT/buildtrees" 2>/dev/null | head -10 | while read -r f; do
+              echo "########## $f ##########"
+              tail -n 80 "$f" || true
             done
             exit 1
           fi
+
+      - name: Upload vcpkg logs on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vcpkg-logs
+          path: |
+            /tmp/vcpkglog/
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -157,9 +229,6 @@ jobs:
 
       - name: Build rustdesk lib
         shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           rustup target add ${{ steps.tgt.outputs.target }}
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
@@ -175,9 +244,6 @@ jobs:
 
       - name: Build APK
         shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           cd flutter
           flutter build apk --release --target-platform android-${{ steps.tgt.outputs.archname }}
