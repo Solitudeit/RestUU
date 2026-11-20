@@ -18,6 +18,9 @@ on:
     branches: [master]
     paths:
       - "flutter/lib/**"
+      - "flutter/android/**"
+      - "src/**"
+      - "libs/**"
       - ".github/workflows/android-uu.yml"
 
 env:
